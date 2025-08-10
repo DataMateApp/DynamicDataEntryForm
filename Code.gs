@@ -75,7 +75,23 @@ function showDynamicForm() {
   isNewRecord = false; // edit mode
   if (currentIndex >= 0 && currentIndex < records.length) {
     headers.forEach(header => {
-      document.getElementById(header.name).value = records[currentIndex][header.name] || '';
+      const field = document.getElementById(header.name);
+      const value = records[currentIndex][header.name] || '';
+
+      if (field.tagName === 'SELECT') {
+        // Check if value exists in dropdown
+        let exists = Array.from(field.options).some(opt => opt.value === value);
+        if (!exists && value) {
+          // Add it temporarily so it can be selected
+          const opt = document.createElement('option');
+          opt.value = value;
+          opt.textContent = value;
+          field.appendChild(opt);
+        }
+        field.value = value;
+      } else {
+        field.value = value;
+      }
     });
   }
 }
