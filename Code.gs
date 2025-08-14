@@ -188,7 +188,7 @@ function showDynamicForm() {
           google.script.run
             .withSuccessHandler(result => {
               document.getElementById('spinner').style.display = 'none';
-              if (result && Object.keys(result.record).length > 0) {
+              if (result && result.record && Object.keys(result.record).length > 0) {
                 console.log(\`Record found for ID \${searchId}: \${JSON.stringify(result.record)}, Row=\${result.rowNumber}\`);
                 records = records.filter(r => String(r.ID) !== String(searchId));
                 records.push(result.record);
@@ -211,6 +211,7 @@ function showDynamicForm() {
         }
 
         function saveRecord() {
+          console.log(\`Saving record: isNewRecord=\${isNewRecord}, currentRowNumber=\${currentRowNumber}\`);
           document.getElementById('spinner').style.display = 'block';
           const formData = {};
           headers.forEach(header => {
@@ -234,11 +235,13 @@ function showDynamicForm() {
           }
 
           if (isNewRecord) {
+            console.log('Calling addRecord for new record');
             google.script.run
               .withSuccessHandler(result => onSave(result, null))
               .withFailureHandler(onError)
               .addRecord(formData);
-          } else if (currentRowNumber) {
+          } else if (currentRowNumber && currentRowNumber > 1) {
+            console.log(\`Calling updateRecord for row \${currentRowNumber}\`);
             formData._rowNumber = currentRowNumber;
             google.script.run
               .withSuccessHandler(result => onSave(result, currentRowNumber))
@@ -246,7 +249,7 @@ function showDynamicForm() {
               .updateRecord(formData);
           } else {
             console.error('No valid row number for updating record');
-            showMessage('Error: Cannot update record, no row number available.', 'error');
+            showMessage('Error: Cannot update record, no valid row number available.', 'error');
             document.getElementById('spinner').style.display = 'none';
           }
         }
@@ -396,6 +399,26 @@ function showDynamicForm() {
 }
 
 function doGet() {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const user = Session.getActiveUser().getEmail();
+    const owner = ss.getOwner().getEmail();
+    const editors = ss.getEditors().map(e => e.getEmail());
+    if (user !== owner && !editors.includes(user)) {
+      Logger.log(`User ${user} lacks edit access to spreadsheet`);
+      return HtmlService.createHtmlOutput(`
+        <h3>Access Denied</h3>
+        <p>You do not have permission to edit this spreadsheet. Please contact the owner (${owner}) to request edit access.</p>
+      `).setTitle('Dynamic Data Entry Form');
+    }
+  } catch (e) {
+    Logger.log(`Error checking permissions: ${e.message}`);
+    return HtmlService.createHtmlOutput(`
+      <h3>Error</h3>
+      <p>Unable to verify permissions: ${e.message}. Please ensure you are logged in and have edit access to the spreadsheet.</p>
+    `).setTitle('Dynamic Data Entry Form');
+  }
+
   const htmlContent = `
     <!DOCTYPE html>
     <html>
@@ -598,6 +621,7 @@ function doGet() {
         }
 
         function saveRecord() {
+          console.log(\`Saving record: isNewRecord=\${isNewRecord}, currentRowNumber=\${currentRowNumber}\`);
           document.getElementById('spinner').style.display = 'block';
           const formData = {};
           headers.forEach(header => {
@@ -621,11 +645,13 @@ function doGet() {
           }
 
           if (isNewRecord) {
+            console.log('Calling addRecord for new record');
             google.script.run
               .withSuccessHandler(result => onSave(result, null))
               .withFailureHandler(onError)
               .addRecord(formData);
-          } else if (currentRowNumber) {
+          } else if (currentRowNumber && currentRowNumber > 1) {
+            console.log(\`Calling updateRecord for row \${currentRowNumber}\`);
             formData._rowNumber = currentRowNumber;
             google.script.run
               .withSuccessHandler(result => onSave(result, currentRowNumber))
@@ -633,7 +659,7 @@ function doGet() {
               .updateRecord(formData);
           } else {
             console.error('No valid row number for updating record');
-            showMessage('Error: Cannot update record, no row number available.', 'error');
+            showMessage('Error: Cannot update record, no valid row number available.', 'error');
             document.getElementById('spinner').style.display = 'none';
           }
         }
@@ -854,10 +880,14 @@ function protectAllFormulaCells() {
     for (let c = 0; c < formulas[r].length; c++) {
       if (formulas[r][c]) {
         const cell = sheet.getRange(r + 1, c + 1);
-        const protection = cell.protect();
-        protection.setDescription('Formula cell - do not edit');
-        protection.removeEditors(protection.getEditors());
-        Logger.log(`Protected formula cell at ${sheet.getName()}!${cell.getA1Notation()}`);
+        try {
+          const protection = cell.protect();
+          protection.setDescription('Formula cell - do not edit');
+          protection.removeEditors(protection.getEditors());
+          Logger.log(`Protected formula cell at ${sheet.getName()}!${cell.getA1Notation()}`);
+        } catch (e) {
+          Logger.log(`Error protecting cell ${sheet.getName()}!${cell.getA1Notation()}: ${e.message}`);
+        }
       }
     }
   }
@@ -951,10 +981,15 @@ function getColumnAValues() {
     Logger.log(`No data rows in ${sheet.getName()}, returning empty array for column A`);
     return [];
   }
-  const values = sheet.getRange(2, 1, lastRow - 1, 1).getValues().flat();
-  const uniqueValues = [...new Set(values.filter(v => v != null && v.toString().trim() !== '').map(v => v.toString().trim()))];
-  Logger.log(`Column A values in ${sheet.getName()}: ${JSON.stringify(uniqueValues)}`);
-  return uniqueValues;
+  try {
+    const values = sheet.getRange(2, 1, lastRow - 1, 1).getValues().flat();
+    const uniqueValues = [...new Set(values.filter(v => v != null && v.toString().trim() !== '').map(v => v.toString().trim()))];
+    Logger.log(`Column A values in ${sheet.getName()}: ${JSON.stringify(uniqueValues)}`);
+    return uniqueValues;
+  } catch (e) {
+    Logger.log(`Error getting column A values: ${e.message}`);
+    return [];
+  }
 }
 
 function getVisibleRecords() {
@@ -991,13 +1026,18 @@ function addRecord(formData) {
   const sheet = getTargetSheet();
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
 
-  const lastId = sheet.getLastRow() > 1 ? Number(sheet.getRange(sheet.getLastRow(), 1).getValue()) || 0 : 0;
-  const newId = lastId + 1;
+  try {
+    const lastId = sheet.getLastRow() > 1 ? Number(sheet.getRange(sheet.getLastRow(), 1).getValue()) || 0 : 0;
+    const newId = lastId + 1;
 
-  const row = headers.map(header => header === 'ID' ? newId : formData[header] || '');
-  sheet.appendRow(row);
-  Logger.log(`Added record with ID ${newId} to ${sheet.getName()}`);
-  return { status: 'success', id: newId };
+    const row = headers.map(header => header === 'ID' ? newId : formData[header] || '');
+    sheet.appendRow(row);
+    Logger.log(`Added record with ID ${newId} to ${sheet.getName()}`);
+    return { status: 'success', id: newId };
+  } catch (e) {
+    Logger.log(`Error adding record: ${e.message}`);
+    return { status: 'error', message: `Failed to add record: ${e.message}` };
+  }
 }
 
 function updateRecord(formData) {
@@ -1009,37 +1049,47 @@ function updateRecord(formData) {
     return { status: 'error', message: 'Invalid row number' };
   }
 
-  const existingRowValues = sheet.getRange(formData._rowNumber, 1, 1, headers.length).getValues()[0];
-  const existingRowFormulas = sheet.getRange(formData._rowNumber, 1, 1, headers.length).getFormulas()[0];
+  try {
+    const existingRowValues = sheet.getRange(formData._rowNumber, 1, 1, headers.length).getValues()[0];
+    const existingRowFormulas = sheet.getRange(formData._rowNumber, 1, 1, headers.length).getFormulas()[0];
 
-  const updatedRow = headers.map((header, idx) => {
-    if (existingRowFormulas[idx]) {
-      return existingRowFormulas[idx];
-    } else {
-      return (formData[header] !== '' && formData[header] !== undefined)
-        ? formData[header]
-        : existingRowValues[idx];
-    }
-  });
+    const updatedRow = headers.map((header, idx) => {
+      if (existingRowFormulas[idx]) {
+        return existingRowFormulas[idx];
+      } else {
+        return (formData[header] !== '' && formData[header] !== undefined)
+          ? formData[header]
+          : existingRowValues[idx];
+      }
+    });
 
-  sheet.getRange(formData._rowNumber, 1, 1, headers.length).setValues([updatedRow]);
-  Logger.log(`Updated record at row ${formData._rowNumber} in ${sheet.getName()}`);
-  return { status: 'success', row: formData._rowNumber };
+    sheet.getRange(formData._rowNumber, 1, 1, headers.length).setValues([updatedRow]);
+    Logger.log(`Updated record at row ${formData._rowNumber} in ${sheet.getName()}`);
+    return { status: 'success', row: formData._rowNumber };
+  } catch (e) {
+    Logger.log(`Error updating record at row ${formData._rowNumber}: ${e.message}`);
+    return { status: 'error', message: `Failed to update record: ${e.message}` };
+  }
 }
 
 function deleteRecord(id) {
   const sheet = getTargetSheet();
   const data = sheet.getDataRange().getValues();
 
-  for (let i = 1; i < data.length; i++) {
-    if (String(data[i][0]) === String(id)) {
-      sheet.deleteRow(i + 1);
-      Logger.log(`Deleted record with ID ${id} from ${sheet.getName()}`);
-      return { status: 'success' };
+  try {
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][0]) === String(id)) {
+        sheet.deleteRow(i + 1);
+        Logger.log(`Deleted record with ID ${id} from ${sheet.getName()}`);
+        return { status: 'success' };
+      }
     }
+    Logger.log(`No record found to delete with ID ${id} in ${sheet.getName()}`);
+    return { status: 'error', message: 'Record not found' };
+  } catch (e) {
+    Logger.log(`Error deleting record with ID ${id}: ${e.message}`);
+    return { status: 'error', message: `Failed to delete record: ${e.message}` };
   }
-  Logger.log(`No record found to delete with ID ${id} in ${sheet.getName()}`);
-  return { status: 'error', message: 'Record not found' };
 }
 
 function getRecordById(id) {
